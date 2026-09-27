@@ -52,6 +52,15 @@ class Service:
         record = self.repository.get(record_id)
         self.rules.require_transition(record, action)
         new_state, new_payload, summary = self.rules.apply_action(record, action, data or {})
+        changes = {key: value for key, value in new_payload.items() if record["payload"].get(key) != value}
+        details = {
+            "summary": summary,
+            "input": data or {},
+            "from": record["state"],
+            "to": new_state,
+            "changes": changes,
+            "previous": {key: record["payload"].get(key) for key in changes},
+        }
         return self.repository.mutate(
             record_id=record_id,
             expected_version=int(expected_version),
@@ -59,7 +68,7 @@ class Service:
             payload=new_payload,
             actor_id=actor.user_id,
             action=action,
-            details={"summary": summary, "input": data or {}, "from": record["state"], "to": new_state},
+            details=details,
         )
 
     def timeline(self, actor: Actor, record_id: int) -> List[Dict[str, Any]]:

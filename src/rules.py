@@ -6,8 +6,8 @@ from .domain import Actor, Conflict, ValidationError, boolean, choice, integer, 
 
 INITIAL_STATE = "draft"
 CREATE_ROLES = {'intake_officer'}
-ACTION_ROLES = {'submit': {'legal_rep', 'case_officer'}, 'request_evidence': {'case_officer'}, 'respond': {'legal_rep'}, 'decide': {'case_officer', 'supervisor'}, 'appeal': {'legal_rep'}, 'close': {'supervisor'}}
-TRANSITIONS = {'submit': {'draft': 'submitted'}, 'request_evidence': {'submitted': 'evidence_requested'}, 'respond': {'evidence_requested': 'response_received'}, 'decide': {'submitted': 'decided', 'response_received': 'decided'}, 'appeal': {'decided': 'appealed'}, 'close': {'decided': 'closed', 'appealed': 'closed'}}
+ACTION_ROLES = {'submit': {'legal_rep', 'case_officer'}, 'request_evidence': {'case_officer'}, 'respond': {'legal_rep'}, 'withdraw_evidence': {'supervisor'}, 'decide': {'case_officer', 'supervisor'}, 'appeal': {'legal_rep'}, 'close': {'supervisor'}}
+TRANSITIONS = {'submit': {'draft': 'submitted'}, 'request_evidence': {'submitted': 'evidence_requested'}, 'respond': {'evidence_requested': 'response_received'}, 'withdraw_evidence': {'evidence_requested': 'submitted'}, 'decide': {'submitted': 'decided', 'response_received': 'decided'}, 'appeal': {'decided': 'appealed'}, 'close': {'decided': 'closed', 'appealed': 'closed'}}
 
 
 class DomainRules:
@@ -43,6 +43,10 @@ class DomainRules:
         p["overdue"] = p["days_remaining"] < 0
         p["submitted_documents"] = []
         p["missing_documents"] = list(p["required_documents"])
+        p["evidence_pending"] = False
+        p["pause_clock"] = False
+        p["paused_remaining_days"] = None
+        p["clock_pauses"] = []
         return p
 
     def check_create_conflicts(self, payload: Dict[str, Any], existing: Iterable[Dict[str, Any]]) -> None:
@@ -74,19 +78,53 @@ class DomainRules:
             changes["waiver_used"] = boolean(data, "supervisor_waiver")
             summary = "申请材料已提交"
         elif action == "request_evidence":
+            if p.get("evidence_pending"):
+                raise Conflict("存在待回应的补件要求，不能重复发起")
             request_day = integer(data, "evidence_request_day", p["response_day"])
             allowed_days = integer(data, "allowed_days", 1)
+            pause_clock = boolean(data, "pause_clock")
             changes["evidence_request_day"] = request_day
             changes["evidence_due_day"] = request_day + allowed_days
             changes["evidence_request"] = text(data, "evidence_request")
+            changes["evidence_pending"] = True
+            changes["pause_clock"] = pause_clock
             summary = "补件要求已发出"
+            if pause_clock:
+                remaining = int(p["deadline_day"]) - request_day
+                changes["paused_remaining_days"] = remaining
+                changes["days_remaining"] = remaining
+                changes["overdue"] = False
+                summary = "补件要求已发出，期限停表并保留剩余%s天，补件截止第%s天" % (remaining, changes["evidence_due_day"])
         elif action == "respond":
             docs = text_list(data, "documents", 1)
-            if int(data.get("response_day", p["response_day"])) > int(p["evidence_due_day"]):
+            response_day = int(data.get("response_day", p["response_day"]))
+            if response_day > int(p["evidence_due_day"]):
                 raise ValidationError("补件回应超过期限")
-            changes["response_day"] = int(data["response_day"])
+            changes["response_day"] = response_day
             changes["evidence_documents"] = docs
+            changes["evidence_pending"] = False
             summary = "补件已回应"
+            if p.get("pause_clock"):
+                saved_days = int(p.get("paused_remaining_days") or 0)
+                new_deadline = response_day + saved_days
+                changes["deadline_day"] = new_deadline
+                changes["days_remaining"] = new_deadline - response_day
+                changes["overdue"] = changes["days_remaining"] < 0
+                changes["pause_clock"] = False
+                pauses = list(p.get("clock_pauses", []))
+                pauses.append({"start_day": int(p["evidence_request_day"]), "end_day": response_day, "saved_days": saved_days})
+                changes["clock_pauses"] = pauses
+                summary = "补件已回应，停表区间第%s-%s天，新期限重算为第%s天" % (p["evidence_request_day"], response_day, new_deadline)
+        elif action == "withdraw_evidence":
+            withdraw_day = integer(data, "withdraw_day", int(p.get("evidence_request_day", 0)))
+            changes["withdraw_day"] = withdraw_day
+            changes["withdraw_reason"] = text(data, "withdraw_reason")
+            changes["evidence_pending"] = False
+            changes["pause_clock"] = False
+            changes["paused_remaining_days"] = None
+            changes["days_remaining"] = int(p["deadline_day"]) - withdraw_day
+            changes["overdue"] = changes["days_remaining"] < 0
+            summary = "补件要求已撤回，恢复原期限第%s天" % int(p["deadline_day"])
         elif action == "decide":
             changes["decision"] = choice(data, "decision", ["granted", "denied", "withdrawn"])
             changes["decision_reason"] = text(data, "decision_reason")

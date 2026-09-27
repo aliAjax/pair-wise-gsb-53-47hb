@@ -35,6 +35,13 @@ python3 app.py --db ./data.db --port 8329
 
 除`/health`和`/`外，请求需提供`X-User-Id`、`X-Role`，可选`X-Org`。
 
+## 补件停表
+
+- `request_evidence`（专员）：登记`evidence_request_day`（请求日）、`allowed_days`（补件天数）和`pause_clock`（是否停表）。停表时冻结`days_remaining`并保存到`paused_remaining_days`，等待回应期间`overdue`恒为`false`。已有待回应补件时重复发起会被拒绝。
+- `respond`（申请人回应）：停表中的案件按`回应日 + 保留剩余天数`重算`deadline_day`，停表区间追加到`clock_pauses`并写入审计详情。
+- `withdraw_evidence`（主管）：必须填写`withdraw_reason`，案件回到`submitted`并恢复原`deadline_day`，按撤回日重算剩余天数，之后可继续办理。
+- 记录详情（`GET /api/records/{id}`）展示`pause_clock`、`paused_remaining_days`、`evidence_due_day`、`clock_pauses`等字段；审计时间线（`GET /api/records/{id}/audit`）在`changes`/`previous`中展示停表前后值、补件截止日和撤回原因。
+
 ## 测试
 
 ```bash
